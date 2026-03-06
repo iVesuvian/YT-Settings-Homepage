@@ -239,23 +239,14 @@ jobs:
         echo "→ Eseguibile: $EXEC_PATH"
         file "$EXEC_PATH"
 
-        # ── 1. Rimuovi PRIMA la firma da tutto il bundle ──────────────────
-        # (deve essere fatto prima di modificare i binari)
+        # ── 1. Rimuovi tutte le firme e _CodeSignature ───────────────────
         echo "→ Rimuovo firme originali..."
-        find "$APP_PATH" -name "*.dylib" | while read f; do
-          codesign --remove-signature "$f" 2>/dev/null || true
-        done
-        find "$APP_PATH" -name "*.framework" | while read f; do
-          codesign --remove-signature "$f" 2>/dev/null || true
-        done
-        find "$APP_PATH" -name "*.appex" | while read f; do
-          codesign --remove-signature "$f" 2>/dev/null || true
-        done
+        find "$APP_PATH" -name "_CodeSignature" -type d -exec rm -rf {} + 2>/dev/null || true
+        find "$APP_PATH" -name "*.dylib" -exec codesign --remove-signature {} \; 2>/dev/null || true
+        find "$APP_PATH" -name "*.framework" -exec codesign --remove-signature {} \; 2>/dev/null || true
+        find "$APP_PATH" -name "*.appex"     -exec codesign --remove-signature {} \; 2>/dev/null || true
         codesign --remove-signature "$EXEC_PATH" 2>/dev/null || true
         codesign --remove-signature "$APP_PATH"  2>/dev/null || true
-
-        # Rimuovi cartella _CodeSignature
-        rm -rf "$APP_PATH/_CodeSignature"
 
         # ── 2. Copia la dylib dentro Frameworks/ ─────────────────────────
         mkdir -p "$APP_PATH/Frameworks"
@@ -276,17 +267,35 @@ jobs:
           exit 1
         }
 
-        # ── 4. Firma con ldid tutti i binari (pseudo-firma per sideload) ──
-        echo "→ Applico ldid a tutti i binari..."
-        ldid -S "$APP_PATH/Frameworks/$DYLIB_NAME"
-        ldid -S "$EXEC_PATH"
-        find "$APP_PATH/Frameworks" -name "*.dylib" | while read f; do
-          ldid -S "$f" 2>/dev/null || true
+        # ── 4. Firma ad-hoc con codesign (richiesto da AltStore/Feather) ──
+        # L'ordine è fondamentale: prima dylib/framework, poi eseguibile, poi .app
+        echo "→ Firma ad-hoc con codesign..."
+
+        # 4a. Firma tutte le dylib standalone in Frameworks/
+        find "$APP_PATH/Frameworks" -maxdepth 1 -name "*.dylib" | while read f; do
+          codesign --force --sign - "$f" 2>/dev/null || true
         done
-        find "$APP_PATH/Frameworks" -name "*.framework" | while read f; do
-          BIN="$f/$(basename $f .framework)"
-          [ -f "$BIN" ] && ldid -S "$BIN" 2>/dev/null || true
+
+        # 4b. Firma i binari dentro ogni .framework (prima il binario, poi il bundle)
+        find "$APP_PATH/Frameworks" -maxdepth 1 -name "*.framework" | while read fw; do
+          FW_BIN="$fw/$(basename "$fw" .framework)"
+          [ -f "$FW_BIN" ] && codesign --force --sign - "$FW_BIN" 2>/dev/null || true
+          codesign --force --sign - "$fw" 2>/dev/null || true
         done
+
+        # 4c. Firma le app extension (.appex)
+        find "$APP_PATH/PlugIns" -name "*.appex" 2>/dev/null | while read appex; do
+          codesign --force --sign - "$appex" 2>/dev/null || true
+        done
+
+        # 4d. Firma l'eseguibile principale
+        codesign --force --sign - "$EXEC_PATH"
+
+        # 4e. Firma il bundle .app (ultimo, obbligatorio)
+        codesign --force --sign - "$APP_PATH"
+
+        echo "→ Verifica firma finale:"
+        codesign -v "$APP_PATH" 2>&1 || true
 
         # ── 5. Ricrea l'IPA ───────────────────────────────────────────────
         echo "→ Ricreo IPA patchato..."
