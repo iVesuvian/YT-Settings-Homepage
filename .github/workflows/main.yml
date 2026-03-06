@@ -83,10 +83,23 @@ jobs:
         ls "$THEOS_DIR/sdks/"
 
     # ── 4. Installa dipendenze macOS ───────────────────────────────────────
-    - name: 📦 Installa dipendenze (ldid, dpkg, fakeroot)
+    - name: 📦 Installa dipendenze (ldid, dpkg)
       run: |
-        brew install ldid dpkg fakeroot || true
-        # ldid è necessario per firmare la dylib (fake-codesign)
+        # fakeroot di Homebrew è arm64 e non compatibile con arm64e del runner
+        # lo installiamo da MacPorts che fornisce una versione compatibile
+        brew install ldid dpkg || true
+
+        # Installa MacPorts silenziosamente per ottenere fakeroot arm64e-compatibile
+        MACPORTS_PKG="MacPorts-2.10.1-14-Sonoma.pkg"
+        curl -fsSL "https://github.com/macports/macports-base/releases/download/v2.10.1/${MACPORTS_PKG}" \
+          -o /tmp/MacPorts.pkg
+        sudo installer -pkg /tmp/MacPorts.pkg -target / -quiet
+        export PATH="/opt/local/bin:/opt/local/sbin:$PATH"
+        sudo port -q install fakeroot
+
+        # Sostituisci il fakeroot di brew con quello di MacPorts
+        sudo ln -sf /opt/local/bin/fakeroot /usr/local/bin/fakeroot
+        fakeroot --version
 
     # ── 5. Compila il tweak con Theos ─────────────────────────────────────
     - name: 🔨 Compila Tweak → dylib
@@ -94,6 +107,7 @@ jobs:
         set -euo pipefail
         export THEOS="$THEOS_DIR"
         export THEOS_MAKE_PATH="$THEOS_DIR/makefiles"
+        export PATH="/opt/local/bin:/opt/local/sbin:$PATH"
 
         echo "→ Theos: $THEOS"
         echo "→ SDK disponibili:"
