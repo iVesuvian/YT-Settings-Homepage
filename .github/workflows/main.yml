@@ -239,14 +239,29 @@ jobs:
         echo "→ Eseguibile: $EXEC_PATH"
         file "$EXEC_PATH"
 
-        # Copia la dylib dentro l'app bundle
+        # ── 1. Rimuovi PRIMA la firma da tutto il bundle ──────────────────
+        # (deve essere fatto prima di modificare i binari)
+        echo "→ Rimuovo firme originali..."
+        find "$APP_PATH" -name "*.dylib" | while read f; do
+          codesign --remove-signature "$f" 2>/dev/null || true
+        done
+        find "$APP_PATH" -name "*.framework" | while read f; do
+          codesign --remove-signature "$f" 2>/dev/null || true
+        done
+        find "$APP_PATH" -name "*.appex" | while read f; do
+          codesign --remove-signature "$f" 2>/dev/null || true
+        done
+        codesign --remove-signature "$EXEC_PATH" 2>/dev/null || true
+        codesign --remove-signature "$APP_PATH"  2>/dev/null || true
+
+        # Rimuovi cartella _CodeSignature
+        rm -rf "$APP_PATH/_CodeSignature"
+
+        # ── 2. Copia la dylib dentro Frameworks/ ─────────────────────────
         mkdir -p "$APP_PATH/Frameworks"
         cp "$BUILD_DIR/$DYLIB_NAME" "$APP_PATH/Frameworks/$DYLIB_NAME"
 
-        # Firma la dylib con ldid (pseudo-firma per sideload)
-        ldid -S "$APP_PATH/Frameworks/$DYLIB_NAME"
-
-        # Inietta il load command nell'eseguibile
+        # ── 3. Inietta il load command nell'eseguibile ────────────────────
         DYLIB_INSTALL_PATH="@executable_path/Frameworks/$DYLIB_NAME"
 
         insert_dylib \
@@ -255,18 +270,25 @@ jobs:
           "$DYLIB_INSTALL_PATH" \
           "$EXEC_PATH"
 
-        echo "→ Verifico load commands iniettati:"
+        echo "→ Verifico load command iniettato:"
         otool -L "$EXEC_PATH" | grep -i "$TWEAK_NAME" || {
           echo "❌ insert_dylib non ha iniettato il load command!"
           exit 1
         }
 
-        # Rimuovi firma originale (necessario per TrollStore / Sideloadly)
-        codesign --remove-signature "$APP_PATH" 2>/dev/null || true
-        find "$APP_PATH" -name "*.dylib" -exec codesign --remove-signature {} \; 2>/dev/null || true
-        find "$APP_PATH" -name "*.framework" -exec codesign --remove-signature {} \; 2>/dev/null || true
+        # ── 4. Firma con ldid tutti i binari (pseudo-firma per sideload) ──
+        echo "→ Applico ldid a tutti i binari..."
+        ldid -S "$APP_PATH/Frameworks/$DYLIB_NAME"
+        ldid -S "$EXEC_PATH"
+        find "$APP_PATH/Frameworks" -name "*.dylib" | while read f; do
+          ldid -S "$f" 2>/dev/null || true
+        done
+        find "$APP_PATH/Frameworks" -name "*.framework" | while read f; do
+          BIN="$f/$(basename $f .framework)"
+          [ -f "$BIN" ] && ldid -S "$BIN" 2>/dev/null || true
+        done
 
-        # Ricrea l'IPA
+        # ── 5. Ricrea l'IPA ───────────────────────────────────────────────
         echo "→ Ricreo IPA patchato..."
         mkdir -p output_ipa/Payload
         cp -R "$APP_PATH" output_ipa/Payload/
