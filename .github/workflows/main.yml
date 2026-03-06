@@ -194,32 +194,25 @@ jobs:
         echo "✅ IPA scaricato: $(du -sh "$INJECT_DIR/YouTube.ipa")"
 
     # ── 8. Installa tool di iniezione ──────────────────────────────────────
-    - name: 🔧 Installa insert_dylib e optool
+    - name: 🔧 Installa insert_dylib
       run: |
         set -euo pipefail
 
-        # ── insert_dylib ─────────────────────────────────────────────────
         echo "→ Compilo insert_dylib..."
         git clone --depth 1 https://github.com/Tyilo/insert_dylib.git /tmp/insert_dylib
         cd /tmp/insert_dylib
-        xcodebuild -quiet -scheme insert_dylib \
+
+        xcodebuild \
+          -scheme insert_dylib \
           -configuration Release \
-          ONLY_ACTIVE_ARCH=NO \
-          ARCHS="x86_64" \
-          -derivedDataPath /tmp/insert_dylib_build 2>&1 | tail -5
+          -derivedDataPath /tmp/insert_dylib_build \
+          ONLY_ACTIVE_ARCH=YES \
+          2>&1 | tail -10
+
         cp /tmp/insert_dylib_build/Build/Products/Release/insert_dylib /usr/local/bin/insert_dylib
         chmod +x /usr/local/bin/insert_dylib
 
-        # ── optool ───────────────────────────────────────────────────────
-        echo "→ Scarico optool..."
-        curl -fsSL \
-          "https://github.com/alexzielenski/optool/releases/latest/download/optool" \
-          -o /usr/local/bin/optool
-        chmod +x /usr/local/bin/optool
-
-        echo "→ Versioni:"
-        insert_dylib --help 2>&1 | head -3 || true
-        optool --help   2>&1 | head -3 || true
+        echo "✅ insert_dylib installato: $(insert_dylib 2>&1 | head -1 || true)"
 
     # ── 9. Inietta la dylib nell'IPA ───────────────────────────────────────
     - name: 💉 Inietta dylib nell'IPA
@@ -264,10 +257,8 @@ jobs:
 
         echo "→ Verifico load commands iniettati:"
         otool -L "$EXEC_PATH" | grep -i "$TWEAK_NAME" || {
-          echo "⚠ insert_dylib fallito, provo con optool..."
-          optool install \
-            -p "$DYLIB_INSTALL_PATH" \
-            -t "$EXEC_PATH"
+          echo "❌ insert_dylib non ha iniettato il load command!"
+          exit 1
         }
 
         # Rimuovi firma originale (necessario per TrollStore / Sideloadly)
