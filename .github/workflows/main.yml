@@ -1,0 +1,336 @@
+name: Build & Inject YTSettingsButton
+
+# ─── Trigger ──────────────────────────────────────────────────────────────────
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'Tweak.x'
+      - 'Makefile'
+      - 'control'
+      - '.github/workflows/build.yml'
+  workflow_dispatch:
+    inputs:
+      youtube_version:
+        description: 'Versione YouTube da decryptare (lascia vuoto per usare l'IPA in release)'
+        required: false
+        default: ''
+      create_release:
+        description: 'Crea una GitHub Release con l'IPA patchato'
+        type: boolean
+        default: true
+
+# ─── Permessi ─────────────────────────────────────────────────────────────────
+permissions:
+  contents: write   # necessario per creare Release
+
+# ─── Job principale ───────────────────────────────────────────────────────────
+jobs:
+  build-and-inject:
+    name: 🔨 Build Tweak → 💉 Inject → 📦 Package IPA
+    runs-on: macos-13        # macOS con Xcode 15, necessario per clang iOS
+
+    env:
+      # ── Cartelle di lavoro ────────────────────────────────────────────────
+      THEOS_DIR:        ${{ github.workspace }}/theos
+      BUILD_DIR:        ${{ github.workspace }}/.build
+      INJECT_DIR:       ${{ github.workspace }}/.inject
+      OUTPUT_DIR:       ${{ github.workspace }}/output
+
+      # ── Identificatori ────────────────────────────────────────────────────
+      TWEAK_NAME:       YTSettingsButton
+      DYLIB_NAME:       YTSettingsButton.dylib
+      BUNDLE_ID:        com.google.ios.youtube
+
+      # ── Versioni ──────────────────────────────────────────────────────────
+      THEOS_REF:        master                 # branch Theos da clonare
+      IOS_SDK_VERSION:  16.5
+
+    steps:
+
+    # ── 1. Checkout del repository ─────────────────────────────────────────
+    - name: 📥 Checkout sorgenti
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 1
+
+    # ── 2. Cache Theos + toolchain ─────────────────────────────────────────
+    - name: 💾 Cache Theos
+      id: cache-theos
+      uses: actions/cache@v4
+      with:
+        path: ${{ env.THEOS_DIR }}
+        key: theos-${{ env.THEOS_REF }}-${{ runner.os }}-v2
+        restore-keys: |
+          theos-${{ env.THEOS_REF }}-${{ runner.os }}-
+
+    # ── 3. Installa Theos (solo se non in cache) ───────────────────────────
+    - name: 🛠 Installa Theos
+      if: steps.cache-theos.outputs.cache-hit != 'true'
+      run: |
+        set -euo pipefail
+
+        echo "→ Clono Theos..."
+        git clone --recursive https://github.com/theos/theos.git \
+            --branch "$THEOS_REF" --depth 1 "$THEOS_DIR"
+
+        echo "→ Scarico SDK iOS $IOS_SDK_VERSION..."
+        SDK_URL="https://github.com/theos/sdks/releases/latest/download/iPhoneOS${IOS_SDK_VERSION}.sdk.tar.xz"
+        mkdir -p "$THEOS_DIR/sdks"
+        curl -fsSL "$SDK_URL" | tar -xJ -C "$THEOS_DIR/sdks"
+
+        echo "→ Verifico SDK..."
+        ls "$THEOS_DIR/sdks/"
+
+    # ── 4. Installa dipendenze macOS ───────────────────────────────────────
+    - name: 📦 Installa dipendenze (ldid, dpkg, fakeroot)
+      run: |
+        brew install ldid dpkg fakeroot || true
+        # ldid è necessario per firmare la dylib (fake-codesign)
+
+    # ── 5. Compila il tweak con Theos ─────────────────────────────────────
+    - name: 🔨 Compila Tweak → dylib
+      run: |
+        set -euo pipefail
+        export THEOS="$THEOS_DIR"
+        export THEOS_MAKE_PATH="$THEOS_DIR/makefiles"
+
+        echo "→ Theos: $THEOS"
+        echo "→ SDK disponibili:"
+        ls "$THEOS/sdks/"
+
+        # Compila solo il .deb (include la dylib)
+        make package \
+          FINALPACKAGE=1 \
+          STRIP=1 \
+          DEBUG=0 \
+          TARGET="iphone:clang:$IOS_SDK_VERSION:14.0" \
+          ARCHS="arm64 arm64e"
+
+        echo "→ Pacchetti generati:"
+        ls packages/
+
+    # ── 6. Estrai la dylib dal .deb ────────────────────────────────────────
+    - name: 📤 Estrai dylib dal .deb
+      run: |
+        set -euo pipefail
+        mkdir -p "$BUILD_DIR"
+
+        DEB_FILE=$(ls packages/*.deb | head -n1)
+        echo "→ Processo: $DEB_FILE"
+
+        # Estrai il .deb (formato ar + tar)
+        cd "$BUILD_DIR"
+        cp "$GITHUB_WORKSPACE/$DEB_FILE" tweak.deb
+        ar x tweak.deb
+
+        # Il contenuto è in data.tar.* (lzma o xz o gz)
+        if ls data.tar.* 1>/dev/null 2>&1; then
+          DATA_TAR=$(ls data.tar.*)
+          echo "→ Estraggo $DATA_TAR"
+          tar xf "$DATA_TAR"
+        fi
+
+        # Trova la dylib
+        DYLIB_PATH=$(find . -name "*.dylib" | head -n1)
+        if [ -z "$DYLIB_PATH" ]; then
+          echo "❌ dylib non trovata nel .deb!"
+          find . -type f
+          exit 1
+        fi
+
+        cp "$DYLIB_PATH" "$BUILD_DIR/$DYLIB_NAME"
+        echo "✅ dylib estratta: $BUILD_DIR/$DYLIB_NAME"
+        file "$BUILD_DIR/$DYLIB_NAME"
+        otool -L "$BUILD_DIR/$DYLIB_NAME"
+
+    # ── 7. Scarica l'IPA di YouTube ────────────────────────────────────────
+    #
+    #  L'IPA decryptato DEVE essere fornito come asset in una Release
+    #  del tuo repository (tag: "ipa-source") oppure come Secret.
+    #
+    #  Opzioni:
+    #    A) Metti l'IPA come asset in Releases > ipa-source > YouTube_XX.X.X.ipa
+    #    B) Aggiungi il link diretto come Secret: IPA_URL
+    #
+    - name: 📥 Scarica IPA YouTube
+      run: |
+        set -euo pipefail
+        mkdir -p "$INJECT_DIR"
+
+        # Priorità 1: Secret IPA_URL
+        if [ -n "${{ secrets.IPA_URL }}" ]; then
+          echo "→ Scarico IPA da secret IPA_URL..."
+          curl -fsSL "${{ secrets.IPA_URL }}" -o "$INJECT_DIR/YouTube.ipa"
+
+        # Priorità 2: Asset nella release "ipa-source"
+        else
+          echo "→ Cerco IPA nelle release del repository..."
+          RELEASE_DATA=$(curl -fsSL \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/tags/ipa-source")
+
+          IPA_URL=$(echo "$RELEASE_DATA" | \
+            python3 -c "import sys,json; \
+              assets=json.load(sys.stdin).get('assets',[]); \
+              ipas=[a['browser_download_url'] for a in assets if a['name'].endswith('.ipa')]; \
+              print(ipas[0] if ipas else '')" 2>/dev/null || true)
+
+          if [ -z "$IPA_URL" ]; then
+            echo "❌ Nessun IPA trovato!"
+            echo ""
+            echo "Istruzioni:"
+            echo "  1. Ottieni l'IPA decryptato di YouTube (es. via Sideloadly, AppDB, ecc.)"
+            echo "  2. Crea una Release con tag 'ipa-source' nel tuo repository"
+            echo "  3. Allega il file YouTube_XX.X.X.ipa come asset"
+            echo "  OPPURE"
+            echo "  Aggiungi il link diretto come Secret 'IPA_URL' nel repository"
+            exit 1
+          fi
+
+          echo "→ Scarico IPA: $IPA_URL"
+          curl -fsSL -L "$IPA_URL" -o "$INJECT_DIR/YouTube.ipa"
+        fi
+
+        echo "✅ IPA scaricato: $(du -sh "$INJECT_DIR/YouTube.ipa")"
+
+    # ── 8. Installa tool di iniezione ──────────────────────────────────────
+    - name: 🔧 Installa insert_dylib e optool
+      run: |
+        set -euo pipefail
+
+        # ── insert_dylib ─────────────────────────────────────────────────
+        echo "→ Compilo insert_dylib..."
+        git clone --depth 1 https://github.com/Tyilo/insert_dylib.git /tmp/insert_dylib
+        cd /tmp/insert_dylib
+        xcodebuild -quiet -scheme insert_dylib \
+          -configuration Release \
+          ONLY_ACTIVE_ARCH=NO \
+          ARCHS="x86_64" \
+          -derivedDataPath /tmp/insert_dylib_build 2>&1 | tail -5
+        cp /tmp/insert_dylib_build/Build/Products/Release/insert_dylib /usr/local/bin/insert_dylib
+        chmod +x /usr/local/bin/insert_dylib
+
+        # ── optool ───────────────────────────────────────────────────────
+        echo "→ Scarico optool..."
+        curl -fsSL \
+          "https://github.com/alexzielenski/optool/releases/latest/download/optool" \
+          -o /usr/local/bin/optool
+        chmod +x /usr/local/bin/optool
+
+        echo "→ Versioni:"
+        insert_dylib --help 2>&1 | head -3 || true
+        optool --help   2>&1 | head -3 || true
+
+    # ── 9. Inietta la dylib nell'IPA ───────────────────────────────────────
+    - name: 💉 Inietta dylib nell'IPA
+      run: |
+        set -euo pipefail
+        cd "$INJECT_DIR"
+        mkdir -p output_ipa
+
+        echo "→ Estraggo IPA..."
+        unzip -q YouTube.ipa -d extracted_ipa
+
+        # Trova il bundle principale .app
+        APP_PATH=$(find extracted_ipa/Payload -maxdepth 1 -name "*.app" | head -n1)
+        if [ -z "$APP_PATH" ]; then
+          echo "❌ Bundle .app non trovato nel Payload!"
+          ls extracted_ipa/Payload/
+          exit 1
+        fi
+        echo "→ App bundle: $APP_PATH"
+
+        # Eseguibile principale (stesso nome del .app senza estensione)
+        APP_NAME=$(basename "$APP_PATH" .app)
+        EXEC_PATH="$APP_PATH/$APP_NAME"
+        echo "→ Eseguibile: $EXEC_PATH"
+        file "$EXEC_PATH"
+
+        # Copia la dylib dentro l'app bundle
+        mkdir -p "$APP_PATH/Frameworks"
+        cp "$BUILD_DIR/$DYLIB_NAME" "$APP_PATH/Frameworks/$DYLIB_NAME"
+
+        # Firma la dylib con ldid (pseudo-firma per sideload)
+        ldid -S "$APP_PATH/Frameworks/$DYLIB_NAME"
+
+        # Inietta il load command nell'eseguibile
+        DYLIB_INSTALL_PATH="@executable_path/Frameworks/$DYLIB_NAME"
+
+        insert_dylib \
+          --strip-codesig \
+          --inplace \
+          "$DYLIB_INSTALL_PATH" \
+          "$EXEC_PATH"
+
+        echo "→ Verifico load commands iniettati:"
+        otool -L "$EXEC_PATH" | grep -i "$TWEAK_NAME" || {
+          echo "⚠ insert_dylib fallito, provo con optool..."
+          optool install \
+            -p "$DYLIB_INSTALL_PATH" \
+            -t "$EXEC_PATH"
+        }
+
+        # Rimuovi firma originale (necessario per TrollStore / Sideloadly)
+        codesign --remove-signature "$APP_PATH" 2>/dev/null || true
+        find "$APP_PATH" -name "*.dylib" -exec codesign --remove-signature {} \; 2>/dev/null || true
+        find "$APP_PATH" -name "*.framework" -exec codesign --remove-signature {} \; 2>/dev/null || true
+
+        # Ricrea l'IPA
+        echo "→ Ricreo IPA patchato..."
+        mkdir -p output_ipa/Payload
+        cp -R "$APP_PATH" output_ipa/Payload/
+
+        cd output_ipa
+        zip -qr "../YouTube_Patched.ipa" Payload/
+        cd ..
+
+        # Recupera versione YouTube dal Info.plist
+        YT_VERSION=$(defaults read \
+          "$(pwd)/extracted_ipa/Payload/$APP_NAME.app/Info" \
+          CFBundleShortVersionString 2>/dev/null || echo "unknown")
+        echo "YT_VERSION=$YT_VERSION" >> "$GITHUB_ENV"
+
+        mkdir -p "$OUTPUT_DIR"
+        cp "YouTube_Patched.ipa" "$OUTPUT_DIR/YouTube_${YT_VERSION}+YTSettingsButton.ipa"
+        echo "✅ IPA patchato: YouTube_${YT_VERSION}+YTSettingsButton.ipa"
+        ls -lh "$OUTPUT_DIR/"
+
+    # ── 10. Upload artifact ────────────────────────────────────────────────
+    - name: 📎 Upload IPA come artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: YouTube_${{ env.YT_VERSION }}+YTSettingsButton
+        path: ${{ env.OUTPUT_DIR }}/*.ipa
+        retention-days: 30
+        if-no-files-found: error
+
+    # ── 11. Crea GitHub Release (opzionale) ───────────────────────────────
+    - name: 🚀 Crea GitHub Release
+      if: |
+        github.event_name == 'push' && github.ref == 'refs/heads/main' ||
+        (github.event_name == 'workflow_dispatch' && github.event.inputs.create_release == 'true')
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: v${{ env.YT_VERSION }}-ytsettingsbutton
+        name: "YTSettingsButton – YouTube ${{ env.YT_VERSION }}"
+        body: |
+          ## YTSettingsButton 🎛️
+
+          IPA di **YouTube ${{ env.YT_VERSION }}** con il tweak **YTSettingsButton** iniettato.
+
+          ### 📲 Come installare
+          - **TrollStore** (consigliato, nessun account Apple): apri l'IPA con TrollStore
+          - **Sideloadly**: collega il dispositivo e carica l'IPA
+          - **AltStore / Feather**: importa l'IPA dall'app
+
+          ### ⚙️ Cosa fa il tweak
+          Aggiunge un'icona ⚙️ nella navigation bar della homepage di YouTube che apre le impostazioni native dell'app.
+
+          ---
+          *Build automatica via GitHub Actions — commit `${{ github.sha }}`*
+        files: ${{ env.OUTPUT_DIR }}/*.ipa
+        draft: false
+        prerelease: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
