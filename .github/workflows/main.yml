@@ -11,8 +11,8 @@ on:
       - '.github/workflows/build.yml'
   workflow_dispatch:
     inputs:
-      youtube_version:
-        description: "Versione YouTube da decryptare (lascia vuoto per usare l'IPA in release)"
+      ipa_url:
+        description: "Link diretto al file .ipa di YouTube (es. https://example.com/YouTube.ipa)"
         required: false
         default: ''
       create_release:
@@ -28,7 +28,7 @@ permissions:
 jobs:
   build-and-inject:
     name: 🔨 Build Tweak → 💉 Inject → 📦 Package IPA
-    runs-on: macos-13        # macOS con Xcode 15, necessario per clang iOS
+    runs-on: macos-latest
 
     env:
       # ── Cartelle di lavoro ────────────────────────────────────────────────
@@ -158,12 +158,17 @@ jobs:
         set -euo pipefail
         mkdir -p "$INJECT_DIR"
 
-        # Priorità 1: Secret IPA_URL
-        if [ -n "${{ secrets.IPA_URL }}" ]; then
-          echo "→ Scarico IPA da secret IPA_URL..."
-          curl -fsSL "${{ secrets.IPA_URL }}" -o "$INJECT_DIR/YouTube.ipa"
+        # Priorità 1: input diretto dal workflow_dispatch (ipa_url)
+        if [ -n "${{ github.event.inputs.ipa_url }}" ]; then
+          echo "→ Scarico IPA dal link fornito..."
+          curl -fsSL -L "${{ github.event.inputs.ipa_url }}" -o "$INJECT_DIR/YouTube.ipa"
 
-        # Priorità 2: Asset nella release "ipa-source"
+        # Priorità 2: Secret IPA_URL
+        elif [ -n "${{ secrets.IPA_URL }}" ]; then
+          echo "→ Scarico IPA da secret IPA_URL..."
+          curl -fsSL -L "${{ secrets.IPA_URL }}" -o "$INJECT_DIR/YouTube.ipa"
+
+        # Priorità 3: Asset nella release "ipa-source"
         else
           echo "→ Cerco IPA nelle release del repository..."
           RELEASE_DATA=$(curl -fsSL \
@@ -177,14 +182,7 @@ jobs:
               print(ipas[0] if ipas else '')" 2>/dev/null || true)
 
           if [ -z "$IPA_URL" ]; then
-            echo "❌ Nessun IPA trovato!"
-            echo ""
-            echo "Istruzioni:"
-            echo "  1. Ottieni l'IPA decryptato di YouTube (es. via Sideloadly, AppDB, ecc.)"
-            echo "  2. Crea una Release con tag 'ipa-source' nel tuo repository"
-            echo "  3. Allega il file YouTube_XX.X.X.ipa come asset"
-            echo "  OPPURE"
-            echo "  Aggiungi il link diretto come Secret 'IPA_URL' nel repository"
+            echo "❌ Nessun IPA trovato! Fornisci il link nel campo 'ipa_url' al momento del lancio."
             exit 1
           fi
 
