@@ -1,0 +1,9 @@
+Package: com.yourrepo.ytsettingsbutton
+Name: YTSettingsButton
+Version: 1.0.0
+Architecture: iphoneos-arm64
+Description: Aggiunge un'icona ⚙️ Impostazioni nella navigation bar della homepage di YouTube.
+Maintainer: iVesuvian
+Author: iVesuvian
+Section: Tweaks
+Depends: mobilesubstrate | substitute | libhooker, firmware (>= 14.0)
