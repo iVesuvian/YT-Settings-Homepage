@@ -12,11 +12,11 @@ on:
   workflow_dispatch:
     inputs:
       youtube_version:
-        description: 'Versione YouTube da decryptare (lascia vuoto per usare l'IPA in release)'
+        description: "Versione YouTube da decryptare (lascia vuoto per usare l'IPA in release)"
         required: false
         default: ''
       create_release:
-        description: 'Crea una GitHub Release con l'IPA patchato'
+        description: "Crea una GitHub Release con l'IPA patchato"
         type: boolean
         default: true
 
